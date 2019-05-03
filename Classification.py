@@ -1,151 +1,95 @@
+# This Python 3 environment comes with many helpful analytics libraries installed
+# It is defined by the kaggle/python docker image: https://github.com/kaggle/docker-python
+# For example, here's several helpful packages to load in 
+
 import numpy as np # linear algebra
 import pandas as pd # data processing, CSV file I/O (e.g. pd.read_csv)
+
+# Input data files are available in the "../input/" directory.
+# For example, running this (by clicking run or pressing Shift+Enter) will list the files in the input directory
+
+import os
+#print(os.listdir("../input"))
+
 import matplotlib.pyplot as plt
-import re
-from wordcloud import WordCloud
+%matplotlib inline
+from sklearn import model_selection
+from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
+from sklearn.decomposition import TruncatedSVD
+# import lightgbm as lgb
+
+pd.options.mode.chained_assignment = None
+pd.options.display.max_columns = 999
+
+train_df = pd.read_csv('../input/train.csv')
+test_df = pd.read_csv("../input/test.csv")
+train_df.head()
+
+train_df['target'].value_counts()
+
 from nltk.corpus import stopwords
-from keras.preprocessing.text import Tokenizer
-from keras.preprocessing.sequence import pad_sequences
-from keras.utils import to_categorical
-from keras.layers import Embedding
-from keras.initializers import Constant
+from sklearn.metrics import f1_score
+from sklearn.model_selection import KFold
+from sklearn.feature_extraction.text import TfidfVectorizer,CountVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import cross_val_score
+from sklearn.ensemble import RandomForestClassifier
 
-from keras.models import Sequential
-from keras.layers import Dense, Flatten, LSTM, Conv1D, MaxPooling1D, Dropout, Activation
-from sklearn.manifold import TSNE
+train_text = train_df['question_text']
+test_text = test_df['question_text']
+train_target = train_df['target']
+all_text = train_text.append(test_text)
 
-stop = set(stopwords.words('english'))
-train = pd.read_csv('train.csv')
-print(train.head())
+tfidf_vectorizer = TfidfVectorizer()
+tfidf_vectorizer.fit(all_text)
 
-fig,ax = plt.subplots(1,1)
-train.hist(column = 'target', ax = ax)
-ax.set_title('Number of entries classified as sincere vs insincere')
-ax.set_xticks([0,1])
-print('Percent of insincere entries %.3f %%'%(100*(sum(train['target'])/len(train))))
+count_vectorizer = CountVectorizer(max_df=0.8,ngram_range=(1, 1))
+count_vectorizer.fit(all_text)
 
-train[train['target']==1].head()
+kfold = KFold(n_splits = 5, shuffle = True, random_state = 43)
+from sklearn.model_selection import StratifiedKFold
+skf = StratifiedKFold(n_splits=5)
+test_preds = 0
+oof_preds = np.zeros([train_df.shape[0],])
 
-n_posts = 1000
-q_S = ' '.join(train[train['target'] == 0]['question_text'].str.lower().values[:n_posts])
-q_I = ' '.join(train[train['target'] == 1]['question_text'].str.lower().values[:n_posts])
+train_text_features_cv = count_vectorizer.transform(train_text)
+test_text_features_cv = count_vectorizer.transform(test_text)
 
-wordcloud_S = WordCloud(max_font_size=None, stopwords=stop,scale = 2,colormap = 'Dark2').generate(q_S)
-wordcloud_I = WordCloud(max_font_size=None, stopwords=stop,scale = 2,colormap = 'Dark2').generate(q_I)
+# train_text_features_tf = tfidf_vectorizer.transform(train_text)
+# test_text_features_tf = tfidf_vectorizer.transform(test_text)
 
-fig, ax = plt.subplots(1,2, figsize=(20, 5))
-ax[0].imshow(wordcloud_S)
-ax[0].set_title('Top words sincere posts',fontsize = 20)
-ax[0].axis("off")
+from sklearn import svm
+test_preds = 0
+# for i, (train_idx,valid_idx) in enumerate(kfold.split(train_df)):
+for i ,(train_idx,valid_idx) in enumerate(skf.split(train_df, train_df['target'])):
+    x_train, x_valid = train_text_features_cv[train_idx,:], train_text_features_cv[valid_idx,:]
+    y_train, y_valid = train_target[train_idx], train_target[valid_idx]
+    classifier = LogisticRegression(C=3,solver='lbfgs',max_iter=5000,penalty='l2')
+    # liblinear can not use more than one processors
+#     classifier = RandomForestClassifier(n_estimators=100, max_depth=5,n_jobs=-1)
+    
+#     classifier = svm.SVC()
+    print('fitting.......')
+    classifier.fit(x_train,y_train)
+    print('predicting......')
+    print('\n')
+    oof_preds[valid_idx] = classifier.predict_proba(x_valid)[:,1]
+    test_preds += 0.2*classifier.predict_proba(test_text_features_cv)[:,1]
 
-ax[1].imshow(wordcloud_I)
-ax[1].set_title('Top words INsincere posts',fontsize = 20)
-ax[1].axis("off")
 
-plt.show()
+print("done modelling !!!")    
+pred_train = (oof_preds > .15).astype(np.int)
+print(pred_train)
+f1 =f1_score(train_target, pred_train)
+print(f1)
+# rf_df= pd.DataFrame()
+# np.array(oof_preds).max()
 
-embeddings_index = {}
-f = open('glove.840B.300d/glove.840B.300d.txt',encoding="utf8")
-print("abjs")
-for line in f:
-    # values = line.split()
-    # word = values[0]
-    # coefs = np.asarray(values[1:], dtype='float32')
-    # embeddings_index[word] = coefs
-    values = line.split()
-    word = ''.join(values[:-300])
-    coefs = np.asarray(values[-300:], dtype='float32')
-    embeddings_index[word] = coefs
-f.close()
+submission1 = pd.DataFrame.from_dict({'qid': test_df['qid']})
+submission1['prediction'] = (test_preds>0.14).astype(np.int)
+submission1.to_csv('submission.csv', index=False)
+submission1['prediction'] = (test_preds>0.14)
 
-print('GloVe data loaded')
-
-#Iterate over the data to preprocess by removing stopwords
-lines_without_stopwords=[]
-for line in train['question_text'].values:
-    line = line.lower()
-    line_by_words = re.findall(r'(?:\w+)', line, flags = re.UNICODE) # remove punctuation ans split
-    new_line=[]
-    for word in line_by_words:
-        if word not in stop:
-            new_line.append(word)
-    lines_without_stopwords.append(new_line)
-texts = lines_without_stopwords
-
-print(texts[0:5])
-
-MAX_NUM_WORDS = 1000
-MAX_SEQUENCE_LENGTH = 100
-tokenizer = Tokenizer(num_words=MAX_NUM_WORDS)
-tokenizer.fit_on_texts(texts)
-sequences = tokenizer.texts_to_sequences(texts)
-
-word_index = tokenizer.word_index
-print('Found %s unique tokens.' % len(word_index))
-
-data = pad_sequences(sequences, maxlen=MAX_SEQUENCE_LENGTH)
-
-labels = to_categorical(np.asarray(train['target']))
-print(data.shape)
-print(labels.shape)
-
-## EMBEDDING_DIM =  ## seems to need to match the embeddings_index dimension
-EMBEDDING_DIM = embeddings_index.get('a').shape[0]
-num_words = min(MAX_NUM_WORDS, len(word_index)) + 1
-embedding_matrix = np.zeros((num_words, EMBEDDING_DIM))
-for word, i in word_index.items():
-    if i > MAX_NUM_WORDS:
-        continue
-    embedding_vector = embeddings_index.get(word) ## This references the loaded embeddings dictionary
-    if embedding_vector is not None:
-        # words not found in embedding index will be all-zeros.
-        embedding_matrix[i] = embedding_vector
-
-# load pre-trained word embeddings into an Embedding layer
-# note that we set trainable = False so as to keep the embeddings fixed
-embedding_layer = Embedding(num_words,
-                            EMBEDDING_DIM,
-                            embeddings_initializer=Constant(embedding_matrix),
-                            input_length=MAX_SEQUENCE_LENGTH,
-                            trainable=False)
-
-## Peeking at the embedding matrix values
-print(embedding_matrix.shape)
-plt.plot(embedding_matrix[16])
-plt.plot(embedding_matrix[37])
-plt.plot(embedding_matrix[18])
-plt.title('example vectors')
-
-model = Sequential()
-model.add(Embedding(num_words, 300, input_length=100, weights= [embedding_matrix], trainable=False))
-
-model.add(Dropout(0.2))
-model.add(Conv1D(64, 5, activation='relu'))
-model.add(MaxPooling1D(pool_size=4))
-model.add(LSTM(100))
-model.add(Dense(2, activation='sigmoid'))
-
-model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
-
-## Fit train data
-print(labels.shape)
-model.fit(data, np.array(labels), validation_split=0.1, epochs = 1)
-from sklearn.manifold import TSNE
-## Get weights
-embds = model.layers[0].get_weights()[0]
-## Plotting function
-## Visualize words in two dimensions
-tsne_embds = TSNE(n_components=2).fit_transform(embds)
-
-plt.plot(tsne_embds[:,0],tsne_embds[:,1],'.')
-plt.show()
-
-test = pd.read_csv('test.csv')
-print(test.head())
-
-#iske baad phass rha dont know wht to put inside that predict wala bracket
-pred = model.predict()
-
-pred = np.round(pred)
-
-print(test)
+#print(test_df)
+print(submission1.shape)
+print(submission1['prediction'])
